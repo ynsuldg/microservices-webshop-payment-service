@@ -102,7 +102,17 @@ public class CheckoutService {
 
     // Lämnar endast ut status när den verifierade kunden äger betalningsordern.
     public CheckoutStatus status(UUID id, String customerName) {
-        var order = orders.get(id);
+        se.iths.yunus.paymentservice.dto.PaymentOrder order;
+        try {
+            order = orders.get(id);
+        } catch (org.springframework.web.client.RestClientResponseException exception) {
+            // Bevarar saknad order som 404 utan att förväxla den med ett tillfälligt serverfel.
+            if (exception.getStatusCode().value() == 404) {
+                throw new org.springframework.web.server.ResponseStatusException(
+                        org.springframework.http.HttpStatus.NOT_FOUND, "Payment order not found.");
+            }
+            throw exception;
+        }
         if (!Objects.equals(customerName, order.customerName())) {
             throw new org.springframework.web.server.ResponseStatusException(
                     org.springframework.http.HttpStatus.FORBIDDEN);
