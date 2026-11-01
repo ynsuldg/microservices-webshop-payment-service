@@ -52,6 +52,15 @@ public class PaymentController {
         return checkoutService.status(id, customerName);
     }
 
+    public record CancelRequest(@jakarta.validation.constraints.NotBlank String customerName) { }
+
+    // Tar emot kundens uttryckliga avbrott via gatewayn och verifierar Stripe innan lagret frigörs.
+    @PostMapping("/internal/checkouts/{id}/cancel")
+    public CheckoutService.CheckoutStatus cancel(@PathVariable UUID id, @Valid @RequestBody CancelRequest request)
+            throws StripeException {
+        return checkoutService.cancel(id, request.customerName());
+    }
+
     // Visar retursidan utan att bekräfta betalning eller uppdatera någon order.
     @GetMapping(value = "/success", produces = MediaType.TEXT_HTML_VALUE)
     public String success() {

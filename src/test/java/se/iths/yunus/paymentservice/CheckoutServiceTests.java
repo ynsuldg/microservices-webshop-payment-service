@@ -4,6 +4,7 @@ import com.stripe.StripeClient;
 import com.stripe.model.checkout.Session;
 import com.stripe.net.RequestOptions;
 import com.stripe.param.checkout.SessionCreateParams;
+import com.stripe.param.checkout.SessionExpireParams;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -154,6 +155,127 @@ class CheckoutServiceTests {
         when(orders.get(id)).thenReturn(order(null, Instant.now(), new BigDecimal("12.50")));
         assertEquals("PENDING_PAYMENT", service.status(id, "customer").status());
         verifyNoInteractions(stripe);
+    }
+
+    // Frigör ordern först efter att Stripe bekräftat utgång och tål ett upprepat avbrott.
+    @Test
+    void cancelsOpenCheckoutBeforeReleasingReservation() throws Exception {
+        var pending = order("cs_test_checkout", Instant.now(), new BigDecimal("12.50"));
+        var cancelled = closedOrder("CANCELLED");
+        when(orders.get(id)).thenReturn(pending, cancelled, cancelled);
+        var open = session();
+        open.setMode("payment");
+        open.setPaymentStatus("unpaid");
+        var expired = session();
+        expired.setMode("payment");
+        expired.setStatus("expired");
+        expired.setPaymentStatus("unpaid");
+        var sessions = stripe.v1().checkout().sessions();
+        when(sessions.retrieve("cs_test_checkout")).thenReturn(open);
+        when(sessions.expire(eq("cs_test_checkout"), any(SessionExpireParams.class))).thenReturn(expired);
+
+        assertEquals("CANCELLED", service.cancel(id, "customer").status());
+        assertEquals("CANCELLED", service.cancel(id, "customer").status());
+        var sequence = inOrder(sessions, orders);
+        sequence.verify(sessions).expire(eq("cs_test_checkout"), any(SessionExpireParams.class));
+        sequence.verify(orders).expirePayment(id, "cs_test_checkout");
+        verify(orders, times(1)).expirePayment(id, "cs_test_checkout");
+        verify(orders, never()).confirmPayment(any(), any(), any(), any());
+    }
+
+    // Bekräftar en betalning som hann slutföras medan kunden försökte avbryta.
+    @Test
+    void paymentWinsRaceAgainstCancellation() throws Exception {
+        when(orders.get(id)).thenReturn(order("cs_test_checkout", Instant.now(), new BigDecimal("12.50")),
+                closedOrder("PAID"));
+        var open = session();
+        open.setMode("payment");
+        open.setPaymentStatus("unpaid");
+        var paid = session();
+        paid.setMode("payment");
+        paid.setStatus("complete");
+        paid.setPaymentStatus("paid");
+        var sessions = stripe.v1().checkout().sessions();
+        when(sessions.retrieve("cs_test_checkout")).thenReturn(open, paid);
+        when(sessions.expire(eq("cs_test_checkout"), any(SessionExpireParams.class)))
+                .thenThrow(new com.stripe.exception.InvalidRequestException("Not open", null, null, null, 400, null));
+
+        assertEquals("PAID", service.cancel(id, "customer").status());
+        verify(orders).confirmPayment(id, "cs_test_checkout", 2500L, "usd");
+        verify(orders, never()).expirePayment(any(), any());
+    }
+
+    // Tillåter återförsök när Stripe redan stängts men det tidigare ordersvaret försvann.
+    @Test
+    void reconcilesAlreadyExpiredSessionWithoutExpiringAgain() throws Exception {
+        when(orders.get(id)).thenReturn(order("cs_test_checkout", Instant.now(), new BigDecimal("12.50")),
+                closedOrder("CANCELLED"));
+        var expired = session();
+        expired.setMode("payment");
+        expired.setStatus("expired");
+        expired.setPaymentStatus("unpaid");
+        when(stripe.v1().checkout().sessions().retrieve("cs_test_checkout")).thenReturn(expired);
+
+        assertEquals("CANCELLED", service.cancel(id, "customer").status());
+        verify(stripe.v1().checkout().sessions(), never()).expire(anyString(), any(SessionExpireParams.class));
+        verify(orders).expirePayment(id, "cs_test_checkout");
+    }
+
+    // Nekar annan kund innan något Stripe-anrop kan påverka ordern.
+    @Test
+    void rejectsCancellationForAnotherCustomer() {
+        when(orders.get(id)).thenReturn(order("cs_test_checkout", Instant.now(), new BigDecimal("12.50")));
+        var failure = assertThrows(org.springframework.web.server.ResponseStatusException.class,
+                () -> service.cancel(id, "someone-else"));
+        assertEquals(403, failure.getStatusCode().value());
+        verifyNoInteractions(stripe);
+        verify(orders, never()).expirePayment(any(), any());
+    }
+
+    // Frisläpper inget om ett tappat Checkout-svar ännu inte säkert kopplats till ordern.
+    @Test
+    void refusesCancellationWithoutLinkedStripeSession() {
+        when(orders.get(id)).thenReturn(order(null, Instant.now(), new BigDecimal("12.50")));
+        assertThrows(IllegalStateException.class, () -> service.cancel(id, "customer"));
+        verifyNoInteractions(stripe);
+        verify(orders, never()).expirePayment(any(), any());
+    }
+
+    // Förhindrar att en felkopplad eller manipulerad session stängs.
+    @Test
+    void refusesCancellationForMismatchedSession() throws Exception {
+        when(orders.get(id)).thenReturn(order("cs_test_checkout", Instant.now(), new BigDecimal("12.50")));
+        var wrong = session();
+        wrong.setMode("payment");
+        wrong.setAmountTotal(1L);
+        when(stripe.v1().checkout().sessions().retrieve("cs_test_checkout")).thenReturn(wrong);
+        assertThrows(IllegalStateException.class, () -> service.cancel(id, "customer"));
+        verify(stripe.v1().checkout().sessions(), never()).expire(anyString(), any(SessionExpireParams.class));
+        verify(orders, never()).expirePayment(any(), any());
+    }
+
+    // Frisläpper inte lagret om Stripe inte kan bekräfta att sessionen stängts.
+    @Test
+    void keepsReservationWhenStripeExpirationFails() throws Exception {
+        when(orders.get(id)).thenReturn(order("cs_test_checkout", Instant.now(), new BigDecimal("12.50")));
+        var open = session();
+        open.setMode("payment");
+        open.setPaymentStatus("unpaid");
+        when(stripe.v1().checkout().sessions().retrieve("cs_test_checkout")).thenReturn(open);
+        var failure = mock(com.stripe.exception.StripeException.class);
+        when(stripe.v1().checkout().sessions().expire(eq("cs_test_checkout"), any(SessionExpireParams.class)))
+                .thenThrow(failure);
+        assertSame(failure, assertThrows(com.stripe.exception.StripeException.class,
+                () -> service.cancel(id, "customer")));
+        verify(orders, never()).expirePayment(any(), any());
+        verify(orders, never()).confirmPayment(any(), any(), any(), any());
+    }
+
+    // Skapar serverns terminala svar utan att ändra varukorg eller Stripe i testerna.
+    private PaymentOrder closedOrder(String status) {
+        var order = order("cs_test_checkout", Instant.now(), new BigDecimal("12.50"));
+        return new PaymentOrder(order.id(), id, "customer", status, false, order.stripeCheckoutSessionId(),
+                order.orderDate(), order.checkoutRequestedAt(), order.totalPrice(), order.items());
     }
 
     // Skapar en sparad betalningsorder med serverstyrda produktuppgifter.

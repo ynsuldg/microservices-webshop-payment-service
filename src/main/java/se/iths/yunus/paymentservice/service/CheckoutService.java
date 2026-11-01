@@ -2,13 +2,16 @@ package se.iths.yunus.paymentservice.service;
 
 import com.stripe.StripeClient;
 import com.stripe.exception.StripeException;
+import com.stripe.exception.InvalidRequestException;
 import com.stripe.model.checkout.Session;
 import com.stripe.net.RequestOptions;
 import com.stripe.param.checkout.SessionCreateParams;
+import com.stripe.param.checkout.SessionExpireParams;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import se.iths.yunus.paymentservice.client.PaymentOrderClient;
 import se.iths.yunus.paymentservice.dto.CheckoutRequest;
+import se.iths.yunus.paymentservice.dto.PaymentOrder;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.Duration;
@@ -102,7 +105,57 @@ public class CheckoutService {
 
     // Lämnar endast ut status när den verifierade kunden äger betalningsordern.
     public CheckoutStatus status(UUID id, String customerName) {
-        se.iths.yunus.paymentservice.dto.PaymentOrder order;
+        var order = ownedOrder(id, customerName);
+        return new CheckoutStatus(order.id(), order.status());
+    }
+
+    // Stänger rätt Stripe-session före lagerfrisläppning och bekräftar i stället en redan genomförd betalning.
+    public CheckoutStatus cancel(UUID id, String customerName) throws StripeException {
+        var order = ownedOrder(id, customerName);
+        if ("PAID".equals(order.status()) || "CANCELLED".equals(order.status())) {
+            return new CheckoutStatus(order.id(), order.status());
+        }
+        String sessionId = order.stripeCheckoutSessionId();
+        if (!"PENDING_PAYMENT".equals(order.status()) || sessionId == null || !sessionId.startsWith("cs_test_")) {
+            throw new IllegalStateException("Checkout must be linked to a Stripe session before it can be cancelled.");
+        }
+        var session = stripe.v1().checkout().sessions().retrieve(sessionId);
+        validateCancellationSession(order, session);
+        if ("open".equals(session.getStatus()) && "unpaid".equals(session.getPaymentStatus())) {
+            try {
+                session = stripe.v1().checkout().sessions().expire(sessionId, SessionExpireParams.builder().build());
+            } catch (InvalidRequestException exception) {
+                // Betalning eller utgång kan ha hunnit före oss; läs då Stripes faktiska status igen.
+                session = stripe.v1().checkout().sessions().retrieve(sessionId);
+            }
+            validateCancellationSession(order, session);
+        }
+        if ("complete".equals(session.getStatus()) && "paid".equals(session.getPaymentStatus())) {
+            orders.confirmPayment(id, sessionId, session.getAmountTotal(), session.getCurrency());
+        } else if ("expired".equals(session.getStatus()) && "unpaid".equals(session.getPaymentStatus())) {
+            orders.expirePayment(id, sessionId);
+        } else {
+            throw new IllegalStateException("Stripe has not confirmed that Checkout is closed.");
+        }
+        return status(id, customerName);
+    }
+
+    // Matchar konto, session, order, reservation och belopp innan något kan stängas eller frisläppas.
+    private void validateCancellationSession(PaymentOrder order, Session session) {
+        if (!Boolean.FALSE.equals(session.getLivemode()) || !"payment".equals(session.getMode()) ||
+                !Objects.equals(order.stripeCheckoutSessionId(), session.getId()) || order.id() == null ||
+                session.getMetadata() == null ||
+                !order.id().toString().equals(session.getMetadata().get("order_id")) ||
+                !order.reservationId().toString().equals(session.getMetadata().get("reservation_id")) ||
+                !"usd".equals(session.getCurrency()) || order.totalPrice() == null ||
+                !Objects.equals(order.totalPrice().movePointRight(2).longValueExact(), session.getAmountTotal())) {
+            throw new IllegalStateException("Stripe session does not match the payment order.");
+        }
+    }
+
+    // Hämtar ordern och kontrollerar ägaren innan status lämnas ut eller Stripe anropas.
+    private PaymentOrder ownedOrder(UUID id, String customerName) {
+        PaymentOrder order;
         try {
             order = orders.get(id);
         } catch (org.springframework.web.client.RestClientResponseException exception) {
@@ -117,6 +170,6 @@ public class CheckoutService {
             throw new org.springframework.web.server.ResponseStatusException(
                     org.springframework.http.HttpStatus.FORBIDDEN);
         }
-        return new CheckoutStatus(order.id(), order.status());
+        return order;
     }
 }
