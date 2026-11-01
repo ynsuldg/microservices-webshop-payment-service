@@ -40,6 +40,28 @@ class CheckoutServiceTests {
         service = new CheckoutService(stripe, orders, "http://localhost:5173/checkout/return");
     }
 
+    // Bevarar 404 från order-service så att frontend kan hantera en gammal betalningsreferens.
+    @Test
+    void missingOrderStatusReturnsNotFound() {
+        when(orders.get(id)).thenThrow(org.springframework.web.client.HttpClientErrorException.create(
+                org.springframework.http.HttpStatus.NOT_FOUND, "Not found",
+                org.springframework.http.HttpHeaders.EMPTY, new byte[0], null));
+        var exception = assertThrows(org.springframework.web.server.ResponseStatusException.class,
+                () -> service.status(id, "customer"));
+        assertEquals(404, exception.getStatusCode().value());
+        verifyNoInteractions(stripe);
+    }
+
+    // Ett serverfel får aldrig tolkas som att ordern saknas och betalningsförsöket kan rensas.
+    @Test
+    void unavailableOrderServiceIsNotReportedAsMissing() {
+        var failure = new org.springframework.web.client.HttpServerErrorException(
+                org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE);
+        when(orders.get(id)).thenThrow(failure);
+        assertSame(failure, assertThrows(org.springframework.web.client.HttpServerErrorException.class,
+                () -> service.status(id, "customer")));
+    }
+
     // Kontrollerar backendpris, antal, valuta, metadata, idempotensnyckel och sparad sessionskoppling.
     @Test
     void createsCheckoutFromSavedOrder() throws Exception {
