@@ -35,7 +35,7 @@ En idempotensnyckel gör att ett återförsök kan återanvända samma skapandea
 Order- och lagerhanteringen behöver dessutom egna kontroller mot dubbla ändringar.
 Se [Stripes dokumentation om idempotens](https://docs.stripe.com/api/idempotent_requests).
 
-## Föreslaget flöde
+## Betalningsflöde
 
 1. Kunden väljer produkter och startar betalningen i varukorgen.
 2. Gatewayn verifierar kunden. Backend sparar ordern och reserverar lagret.
@@ -43,20 +43,31 @@ Se [Stripes dokumentation om idempotens](https://docs.stripe.com/api/idempotent_
 4. Kunden betalar på Stripes Checkout-sida.
 5. Webhooken verifieras och sessionens aktuella status kontrolleras hos Stripe.
 6. Vid bekräftad betalning markeras ordern PAID, lagerreservationen förbrukas och ordermeddelandet skickas.
-7. Frontenden hämtar backendens status och tömmer varukorgen efter bekräftelse.
+7. Frontenden hämtar backendens status och tömmer motsvarande, oförändrade varukorg efter bekräftelse.
 
 Om kunden lämnar Checkout behålls varukorgen. Lager återställs först när sessionen
 har bekräftats som utgången och obetald.
+
+## Avbrytning av betalningsförsök
+
+Kundvagnen och en redan skapad betalningssession är separata. Att ta bort en produkt eller
+följa Stripes returlänk får därför inte i sig frigöra reserverat lager.
+
+Ett uttryckligt avbrott går via gatewayn med verifierad kundidentitet. Payment-service kontrollerar
+orderns ägare och sessionskoppling och använder Stripes expire-anrop för en öppen obetald session.
+Först efter bekräftad utgång frigörs reservationen. Om betalningen hann slutföras bekräftas ordern i stället.
+Vid nätverksfel behålls betalningsreferensen för ett säkert återförsök.
+Se [Stripes dokumentation om att stänga Checkout-sessioner](https://docs.stripe.com/api/checkout/sessions/expire).
 
 ## Berörda delar i projektet
 
 | Del | Anpassning som behövs för vårt flöde |
 | --- | --- |
-| Payment-service | Stripe-klient, checkout, webhook och statuskontroll. |
+| Payment-service | Stripe-klient, checkout, webhook, statuskontroll och säker avbrytning. |
 | Order-service | Betalningsstatus, sessionskoppling och bekräftelse av ordern. |
 | Product-service | Reservera lager, förbruka reservation eller återställa lager. |
-| Gateway | Verifiera kunden och vidarebefordra betalningsanrop. |
-| Frontend | Betalknapp, omdirigering, felhantering och retursida. |
+| Gateway | Verifiera kunden och vidarebefordra betalnings- och avbrottsanrop. |
+| Frontend | Betalknapp, omdirigering, felhantering, retursida och avbrytningsknapp. |
 | Email-service | Samma valuta som betalningen i orderbekräftelsen. |
 
 ## Lokal testmiljö
@@ -70,9 +81,16 @@ Testa lyckad och nekad betalning, avbruten checkout, återförsök och upprepade
 Stripes testkort `4242 4242 4242 4242` kan användas med ett framtida datum och tresiffrig CVC.
 Se [Stripes testinstruktioner](https://docs.stripe.com/testing).
 
+## Driftsatt testmiljö
+
+På Render används tjänsternas publika adresser och en registrerad HTTPS-webhook med
+destinationens egen signing secret. Den är separat från en lokal CLI-lyssnares hemlighet.
+En testbetalning har verifierats som PAID efter lyckad webhookleverans på Render.
+Avbrytningen har också testats manuellt på Render och fungerar korrekt.
+Pending-länken är lokal för webbläsarfliken; den är inte en kontobaserad orderhistorik.
+
 ## Öppna frågor och nästa steg
 
-- Verifiera ett komplett testköp med automatisk webhookbekräftelse efter att lyssnaren startats om.
-- Bestäm hur väntande ordrar ska återhämtas om sessionen inte kan skapas eller ett webhookanrop missas.
+- Återhämtning av försök som saknar sparad Stripe-session kräver fortsatt utredning. Sådana försök frisläpps inte av avbrytningsknappen.
+- Lokalt och Render delar för närvarande databas; separata databaser skulle isolera testordrar och lagerreservationer mellan miljöerna.
 - Orderstatus och RabbitMQ-publicering är inte atomiska; ytterligare hantering behövs om dubbla mejl vid avbrott måste förhindras.
-- Vid framtida driftsättning behövs en publik HTTPS-webhook, rätt tjänsteadresser och separata miljövariabler.
