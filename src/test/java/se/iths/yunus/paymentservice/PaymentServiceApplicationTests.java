@@ -24,12 +24,13 @@ class PaymentServiceApplicationTests {
     void contextLoads() {
     }
 
-    // Kontrollerar att den gamla testprodukten ersatts av information om webbshoppens betalningsflöde.
+    // Kontrollerar att rotadressen visar samma statussida som övriga backendtjänster.
     @Test
-    void checkoutPageDescribesWebshopPayments() throws Exception {
+    void rootPageShowsServiceStatus() throws Exception {
         mockMvc.perform(get("/"))
                 .andExpect(status().isOk())
-                .andExpect(content().string(containsString("Webshop payments")));
+                .andExpect(content().string(containsString("Payment Service")))
+                .andExpect(content().string(containsString("Service is running")));
     }
 
     // Kontrollerar att den interna checkout-endpointen kräver serverhemlighet.

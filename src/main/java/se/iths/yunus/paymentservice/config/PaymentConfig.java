@@ -4,6 +4,7 @@ import com.stripe.StripeClient;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.web.SecurityFilterChain;
 
@@ -23,6 +24,7 @@ public class PaymentConfig {
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         return http.authorizeHttpRequests(auth -> auth
+                .requestMatchers(HttpMethod.GET, "/index.html").permitAll()
                 .requestMatchers("/", "/success", "/cancel", "/error", "/stripe/webhook").permitAll()
                 .anyRequest().denyAll())
                 // Webhooken verifieras med Stripes signatur och använder inte webbläsarens sessionscookie.

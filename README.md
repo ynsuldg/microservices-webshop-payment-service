@@ -68,6 +68,12 @@ Frontend startas i sitt repository med `npm install` följt av `npm run dev`.
 Testbetalning görs från varukorgen med kortnumret `4242 4242 4242 4242`, ett framtida datum och valfri tresiffrig CVC.
 Retursidan visar betalningen som bekräftad först när backend har registrerat den som betald.
 
+## Statussida
+
+Rotadressen `/` visar **Payment Service** och **Service is running**, med samma utseende som övriga backendtjänster.
+Sidan är publik och kontrollerar bara att tjänsten svarar, inte Stripe, order-service eller andra beroenden.
+Betalnings- och webhookflödets säkerhetsregler gäller fortfarande.
+
 ## Driftsättning på Render
 
 ### Driftsatta tjänster

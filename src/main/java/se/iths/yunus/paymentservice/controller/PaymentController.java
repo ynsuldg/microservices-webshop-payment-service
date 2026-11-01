@@ -26,19 +26,6 @@ public class PaymentController {
         this.checkoutService = checkoutService;
     }
 
-    // Visar information om tjänsten utan någon fristående testprodukt eller betalningsknapp.
-    @GetMapping(value = "/", produces = MediaType.TEXT_HTML_VALUE)
-    public String checkoutPage() {
-        return """
-                <!doctype html>
-                <html lang="en"><head><meta charset="utf-8"><title>Test payment</title></head>
-                <body>
-                <h1>Webshop payments</h1>
-                <p>Checkout is created from a saved webshop order through the protected backend API.</p>
-                </body></html>
-                """;
-    }
-
     // Skapar checkout för riktiga orderrader; endast betrodda interna anrop får nå endpointen.
     @PostMapping("/internal/checkouts/{id}")
     public CheckoutService.CheckoutResponse createCheckout(@PathVariable UUID id,
